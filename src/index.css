@@ -1,0 +1,40 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@400;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+
+  /* Logo-Inspired Palette */
+  --logo-cyan: #00A6CE;
+  --logo-pink: #F3A0A0;
+  --logo-yellow: #FDF08B;
+  --logo-mint: #96D9C8;
+  --logo-lavender: #B3B6D8;
+  --seuss-primary: var(--logo-cyan);
+}
+
+body {
+  @apply bg-slate-50 text-zinc-900 antialiased font-sans overflow-hidden;
+  font-family: 'Outfit', 'Inter', sans-serif;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  @apply bg-zinc-300 rounded-full;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  @apply bg-zinc-400;
+}

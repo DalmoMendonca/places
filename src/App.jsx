@@ -1,17 +1,18 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { MapContainer, TileLayer, useMap } from 'react-leaflet';
 
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Map, Upload, Play, Pause, ChevronDown, ChevronUp, MapPin, Calendar, Trash2, AlertCircle } from 'lucide-react';
+import { Upload, Play, Pause, ChevronDown, ChevronUp, Calendar, Trash2, AlertCircle, ImagePlus, Images } from 'lucide-react';
 import logoUrl from './assets/places-logo.png';
-import { format, subDays, isWithinInterval, startOfDay, endOfDay, parseISO } from 'date-fns';
+import { format, subDays, startOfDay, endOfDay, parseISO } from 'date-fns';
 import clsx from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import ParserWorker from './parser.worker.js?worker';
 import ErrorBoundary from './ErrorBoundary';
 import { enhanceWithDrivingRoute } from './services/mapbox.js';
+import { isJsonFile, isMediaFile, parseMediaFiles } from './services/mediaMetadata.js';
 
 function cn(...inputs) {
   return twMerge(clsx(inputs));
@@ -47,7 +48,7 @@ const Card = ({ children, className }) => (
 const findLastIndexBefore = (locations, targetTime) => {
   let low = 0;
   let high = locations.length - 1;
-  let result = 0;
+  let result = -1;
   while (low <= high) {
     let mid = (low + high) >>> 1;
     if (locations[mid].t <= targetTime) {
@@ -60,16 +61,182 @@ const findLastIndexBefore = (locations, targetTime) => {
   return result;
 };
 
+const parseLocationText = (text) => new Promise((resolve, reject) => {
+  const worker = new ParserWorker();
+
+  worker.onmessage = (e) => {
+    const { type, data, error } = e.data;
+    worker.terminate();
+
+    if (type === 'SUCCESS') {
+      resolve(data);
+    } else {
+      reject(new Error(error || 'Could not parse location history'));
+    }
+  };
+
+  worker.onerror = (error) => {
+    worker.terminate();
+    reject(new Error(error.message || 'Could not parse location history'));
+  };
+
+  worker.postMessage(text);
+});
+
+const mergeMediaItems = (existingItems, incomingItems) => {
+  const itemsById = new Map(existingItems.map((item) => [item.id, item]));
+  const duplicates = [];
+  let added = 0;
+
+  for (const item of incomingItems) {
+    if (itemsById.has(item.id)) {
+      duplicates.push(item);
+    } else {
+      itemsById.set(item.id, item);
+      added += 1;
+    }
+  }
+
+  return {
+    items: Array.from(itemsById.values()).sort((a, b) => a.t - b.t),
+    added,
+    duplicates,
+  };
+};
+
+const mediaItemsToLocations = (items) => (
+  items.map(({ lat, lng, t }) => ({ lat, lng, t, mediaOnly: true }))
+);
+
+const getDefaultDateRange = (locations, mediaItems = []) => {
+  const times = [
+    ...locations.map((item) => item.t),
+    ...mediaItems.map((item) => item.t),
+  ].filter(Number.isFinite);
+
+  if (!times.length) return null;
+
+  const lastTime = Math.max(...times);
+  const lastDate = new Date(lastTime);
+  return {
+    start: subDays(lastDate, 7),
+    end: lastDate,
+  };
+};
+
+const getTimelineBounds = (locations, mediaItems) => {
+  const times = [];
+
+  if (locations.length) {
+    times.push(locations[0].t, locations[locations.length - 1].t);
+  }
+
+  if (mediaItems.length) {
+    times.push(mediaItems[0].t, mediaItems[mediaItems.length - 1].t);
+  }
+
+  const finiteTimes = times.filter(Number.isFinite);
+  if (!finiteTimes.length) return null;
+
+  const start = Math.min(...finiteTimes);
+  const end = Math.max(...finiteTimes);
+
+  return {
+    start,
+    end: end > start ? end : start + 60000,
+  };
+};
+
+const formatImportSummary = ({ jsonPointCount, mediaAdded, mediaSkipped, duplicates }) => {
+  const parts = [];
+
+  if (jsonPointCount) {
+    parts.push(`Loaded ${jsonPointCount.toLocaleString()} location points`);
+  }
+
+  if (mediaAdded) {
+    parts.push(`added ${mediaAdded.toLocaleString()} media ${mediaAdded === 1 ? 'item' : 'items'}`);
+  }
+
+  if (duplicates) {
+    parts.push(`ignored ${duplicates.toLocaleString()} duplicate ${duplicates === 1 ? 'item' : 'items'}`);
+  }
+
+  if (mediaSkipped) {
+    parts.push(`skipped ${mediaSkipped.toLocaleString()} without timestamp or GPS metadata`);
+  }
+
+  if (!parts.length) return '';
+  return `${parts.join(', ')}.`;
+};
+
+const getClipboardFiles = (event) => {
+  const directFiles = Array.from(event.clipboardData?.files || []);
+  const itemFiles = Array.from(event.clipboardData?.items || [])
+    .filter((item) => item.kind === 'file')
+    .map((item) => item.getAsFile())
+    .filter(Boolean);
+
+  const filesByKey = new Map();
+
+  for (const file of [...directFiles, ...itemFiles]) {
+    const key = `${file.name}|${file.size}|${file.type}|${file.lastModified}`;
+    filesByKey.set(key, file);
+  }
+
+  return Array.from(filesByKey.values());
+};
+
+const escapeHtml = (value) => (
+  String(value)
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#039;')
+);
+
+const renderMediaMarkerHtml = (item) => {
+  const src = escapeHtml(item.url);
+  const media = item.type === 'video'
+    ? `<video src="${src}" muted playsinline preload="metadata"></video><span class="media-marker__badge">▶</span>`
+    : `<img src="${src}" alt="" loading="lazy" />`;
+
+  return `
+    <div class="media-marker">
+      <div class="media-marker__thumb">${media}</div>
+      <div class="media-marker__stem"></div>
+    </div>
+  `;
+};
+
+const renderMediaPopupHtml = (item) => {
+  const src = escapeHtml(item.url);
+  const name = escapeHtml(item.name);
+  const date = escapeHtml(new Date(item.t).toLocaleString());
+  const media = item.type === 'video'
+    ? `<video src="${src}" controls playsinline preload="metadata"></video>`
+    : `<img src="${src}" alt="${name}" />`;
+
+  return `
+    <div class="media-popup">
+      <div class="media-popup__media">${media}</div>
+      <div class="media-popup__title">${name}</div>
+      <div class="media-popup__date">${date}</div>
+    </div>
+  `;
+};
+
 // --- Optimised Map Layer ---
 // This component handles the heavy lifting of direct Leaflet manipulation
-const AnimatedPathLayer = ({ locations, progressRef, distRef }) => {
+const AnimatedPathLayer = ({ locations, fitPoints, progressRef, distRef, timeBounds }) => {
 
 
 
   const map = useMap();
   const polylineRef = useRef(null);
   const markerRef = useRef(null);
-  const prevIndexRef = useRef(0);
+  const prevIndexRef = useRef(-2);
   const coordsRef = useRef([]); // Pre-computed [lat, lng] pairs for speed
   const lastSyncProgressRef = useRef(-1);
   const cumulativeDistancesRef = useRef([]); // Pre-computed distances for odometer
@@ -108,7 +275,7 @@ const AnimatedPathLayer = ({ locations, progressRef, distRef }) => {
         })
       }).addTo(map);
     }
-    if (markerRef.current) markerRef.current.setOpacity(locations.length > 0 ? 1 : 0);
+    if (markerRef.current) markerRef.current.setOpacity(0);
 
     return () => {
       if (polylineRef.current) polylineRef.current.remove();
@@ -121,17 +288,17 @@ const AnimatedPathLayer = ({ locations, progressRef, distRef }) => {
 
   // Auto Keep-In-View (Fit Bounds) - Static
   useEffect(() => {
-    if (locations.length > 0 && map) {
-      const bounds = L.latLngBounds(locations.map(l => [l.lat, l.lng]));
+    if (fitPoints.length > 0 && map) {
+      const bounds = L.latLngBounds(fitPoints.map(l => [l.lat, l.lng]));
       if (bounds.isValid()) {
         map.fitBounds(bounds, { padding: [50, 50], maxZoom: 16, animate: true, duration: 1.5 });
       }
     }
-  }, [locations, map]);
+  }, [fitPoints, map]);
 
   // Handle Data Changes
   useEffect(() => {
-    prevIndexRef.current = 0;
+    prevIndexRef.current = -2;
 
     // Pre-compute coordinates ONCE when locations change
     coordsRef.current = locations.map(l => [l.lat, l.lng]);
@@ -179,8 +346,12 @@ const AnimatedPathLayer = ({ locations, progressRef, distRef }) => {
       }
       lastSyncProgressRef.current = p;
 
-      const startTime = locations[0].t;
-      const endTime = locations[locations.length - 1].t;
+      const startTime = timeBounds?.start ?? locations[0].t;
+      const endTime = timeBounds?.end ?? locations[locations.length - 1].t;
+      if (!Number.isFinite(startTime) || !Number.isFinite(endTime) || endTime <= startTime) {
+        animId = requestAnimationFrame(sync);
+        return;
+      }
       const targetTime = startTime + (p * (endTime - startTime));
 
       const lastIndex = findLastIndexBefore(locations, targetTime);
@@ -191,12 +362,12 @@ const AnimatedPathLayer = ({ locations, progressRef, distRef }) => {
         // compared to mapping objects every frame.
         polylineRef.current.setLatLngs(coordsRef.current.slice(0, lastIndex + 1));
 
-        const loc = locations[lastIndex];
+        const loc = lastIndex >= 0 ? locations[lastIndex] : locations[0];
         if (markerRef.current && loc) {
           markerRef.current.setLatLng([loc.lat, loc.lng]);
 
           // --- Stats (Odometer in Miles) ---
-          const currentTotalKm = (cumulativeDistancesRef.current[lastIndex] / 1000);
+          const currentTotalKm = ((cumulativeDistancesRef.current[lastIndex] || 0) / 1000);
           const currentTotalMiles = (currentTotalKm * 0.621371).toFixed(1);
           if (distRef.current) distRef.current.innerText = currentTotalMiles;
 
@@ -210,20 +381,107 @@ const AnimatedPathLayer = ({ locations, progressRef, distRef }) => {
     };
     animId = requestAnimationFrame(sync);
     return () => cancelAnimationFrame(animId);
-  }, [locations, progressRef, map]); // Removed viewMode
+  }, [locations, progressRef, distRef, map, timeBounds]); // Removed viewMode
 
 
   return null;
 }
 
+const AnimatedMediaLayer = ({ mediaItems, progressRef, timeBounds }) => {
+  const map = useMap();
+  const markersRef = useRef(new Map());
+  const lastIndexRef = useRef(-2);
+  const lastSyncProgressRef = useRef(-1);
+
+  useEffect(() => {
+    markersRef.current.forEach((marker) => marker.remove());
+    markersRef.current.clear();
+    lastIndexRef.current = -2;
+    lastSyncProgressRef.current = -1;
+  }, [mediaItems, map]);
+
+  useEffect(() => {
+    const markers = markersRef.current;
+    return () => {
+      markers.forEach((marker) => marker.remove());
+      markers.clear();
+    };
+  }, []);
+
+  useEffect(() => {
+    let animId;
+
+    const sync = () => {
+      if (!map || !timeBounds || !mediaItems.length) {
+        animId = requestAnimationFrame(sync);
+        return;
+      }
+
+      const p = progressRef.current;
+      if (p === lastSyncProgressRef.current) {
+        animId = requestAnimationFrame(sync);
+        return;
+      }
+      lastSyncProgressRef.current = p;
+
+      const targetTime = timeBounds.start + (p * (timeBounds.end - timeBounds.start));
+      const lastIndex = findLastIndexBefore(mediaItems, targetTime);
+
+      if (lastIndex !== lastIndexRef.current) {
+        for (let i = 0; i <= lastIndex; i += 1) {
+          const item = mediaItems[i];
+          if (!item || markersRef.current.has(item.id)) continue;
+
+          const marker = L.marker([item.lat, item.lng], {
+            icon: L.divIcon({
+              html: renderMediaMarkerHtml(item),
+              className: '',
+              iconSize: [64, 78],
+              iconAnchor: [32, 70],
+              popupAnchor: [0, -64],
+            }),
+            keyboard: false,
+          }).addTo(map);
+
+          marker.bindPopup(renderMediaPopupHtml(item), {
+            className: 'media-popup-shell',
+            maxWidth: 280,
+            closeButton: true,
+          });
+          marker._mediaIndex = i;
+          markersRef.current.set(item.id, marker);
+        }
+
+        markersRef.current.forEach((marker, id) => {
+          if (marker._mediaIndex > lastIndex) {
+            marker.remove();
+            markersRef.current.delete(id);
+          }
+        });
+
+        lastIndexRef.current = lastIndex;
+      }
+
+      animId = requestAnimationFrame(sync);
+    };
+
+    animId = requestAnimationFrame(sync);
+    return () => cancelAnimationFrame(animId);
+  }, [map, mediaItems, progressRef, timeBounds]);
+
+  return null;
+};
+
 // --- Main App ---
 
 export default function App() {
   const [rawData, setRawData] = useState(null);
+  const [routeMode, setRouteMode] = useState('none');
+  const [mediaItems, setMediaItems] = useState([]);
   const [locations, setLocations] = useState([]);
   const [error, setError] = useState('');
+  const [importNotice, setImportNotice] = useState('');
   const [processing, setProcessing] = useState(false);
-  const [progress, setProgress] = useState(0); // 0 to 1
 
   // Controls
   const [dateRange, setDateRange] = useState(() => {
@@ -234,7 +492,9 @@ export default function App() {
     if (s && e) {
       try {
         return { start: parseISO(s), end: parseISO(e) };
-      } catch (e) { }
+      } catch {
+        // Ignore invalid URL date params and fall back to the default range.
+      }
     }
     return {
       start: subDays(new Date(), 7),
@@ -253,7 +513,49 @@ export default function App() {
   const clockSubRef = useRef(null);
   const sliderRef = useRef(null);
   const distRef = useRef(null);
-  const totalDistanceRef = useRef(0);
+  const fileInputRef = useRef(null);
+  const mediaItemsRef = useRef([]);
+
+  const filteredMediaItems = useMemo(() => {
+    const s = startOfDay(dateRange.start).getTime();
+    const e = endOfDay(dateRange.end).getTime();
+    return mediaItems.filter((item) => item.t >= s && item.t <= e);
+  }, [mediaItems, dateRange.start, dateRange.end]);
+
+  const fitPoints = useMemo(() => (
+    [...locations, ...filteredMediaItems]
+  ), [locations, filteredMediaItems]);
+
+  const timeBounds = useMemo(() => (
+    getTimelineBounds(locations, filteredMediaItems)
+  ), [locations, filteredMediaItems]);
+
+  const canPlay = Boolean(timeBounds && (locations.length > 1 || filteredMediaItems.length > 0));
+
+  useEffect(() => {
+    mediaItemsRef.current = mediaItems;
+  }, [mediaItems]);
+
+  useEffect(() => {
+    return () => {
+      mediaItemsRef.current.forEach((item) => URL.revokeObjectURL(item.url));
+    };
+  }, []);
+
+  const syncUIToProgress = useCallback(() => {
+    if (!timeBounds) return;
+    const p = progressRef.current;
+    const currentTime = timeBounds.start + (p * (timeBounds.end - timeBounds.start));
+
+    if (clockRef.current) clockRef.current.innerText = format(currentTime, 'MMM dd, yyyy');
+    if (clockSubRef.current) clockSubRef.current.innerText = format(currentTime, 'HH:mm:ss');
+    if (sliderRef.current) sliderRef.current.value = p;
+  }, [timeBounds]);
+
+  const handleScrub = useCallback((val) => {
+    progressRef.current = val;
+    syncUIToProgress();
+  }, [syncUIToProgress]);
 
 
 
@@ -263,11 +565,9 @@ export default function App() {
   useEffect(() => {
     let animId;
     const step = (time) => {
-      if (isPlaying && locations.length > 1) {
+      if (isPlaying && canPlay && timeBounds) {
         const deltaMs = lastTimeRef.current ? (time - lastTimeRef.current) : 16;
-        const startTime = locations[0].t;
-        const endTime = locations[locations.length - 1].t;
-        const totalTravelTime = endTime - startTime;
+        const totalTravelTime = Math.max(1, timeBounds.end - timeBounds.start);
         const travelMsPerRealMs = 12000 * speed;
         const travelDelta = deltaMs * travelMsPerRealMs;
 
@@ -283,90 +583,150 @@ export default function App() {
     };
     animId = requestAnimationFrame(step);
     return () => cancelAnimationFrame(animId);
-  }, [isPlaying, locations, speed]);
-
-  const syncUIToProgress = () => {
-    if (!locations.length) return;
-    const p = progressRef.current;
-    const startTime = locations[0].t;
-    const total = locations[locations.length - 1].t - startTime;
-    const currentTime = startTime + (p * total);
-
-    if (clockRef.current) clockRef.current.innerText = format(currentTime, 'MMM dd, yyyy');
-    if (clockSubRef.current) clockSubRef.current.innerText = format(currentTime, 'HH:mm:ss');
-    if (sliderRef.current) sliderRef.current.value = p;
-  };
-
-  const handleScrub = (val) => {
-    progressRef.current = val;
-    syncUIToProgress();
-  };
+  }, [isPlaying, canPlay, timeBounds, speed, syncUIToProgress]);
 
   // --- Handlers ---
-  const workerRef = useRef(null);
+  const resetJourney = useCallback(() => {
+    mediaItems.forEach((item) => URL.revokeObjectURL(item.url));
+    setMediaItems([]);
+    setRawData(null);
+    setRouteMode('none');
+    setLocations([]);
+    setError('');
+    setImportNotice('');
+    setIsPlaying(false);
+    setIsEnhanced(false);
+    progressRef.current = 0;
+  }, [mediaItems]);
 
-  useEffect(() => {
-    workerRef.current = new ParserWorker();
+  const importFiles = useCallback(async (fileList) => {
+    const files = Array.from(fileList || []);
+    const jsonFiles = files.filter(isJsonFile);
+    const mediaFiles = files.filter(isMediaFile);
 
-    workerRef.current.onmessage = (e) => {
-      const { type, data, error } = e.data;
-      if (type === 'SUCCESS') {
-        const parsed = data;
-        setRawData(parsed);
-        // Default Range
-        if (parsed.length > 0) {
-          const lastTime = parsed[parsed.length - 1].t;
-          const lastDate = new Date(lastTime);
-          setDateRange({
-            start: subDays(lastDate, 7),
-            end: lastDate
-          });
-        }
-        setProcessing(false);
-      } else if (type === 'ERROR') {
-        setError(error);
-        setProcessing(false);
-      }
-    };
-
-    return () => {
-      workerRef.current?.terminate();
-    };
-  }, []);
-
-  const handleFileUpload = (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
+    if (!jsonFiles.length && !mediaFiles.length) {
+      setError('Choose a Google Timeline JSON file, photos, or videos.');
+      return;
+    }
 
     setProcessing(true);
     setError('');
+    setImportNotice('');
     setIsPlaying(false);
-    setLocations([]);
 
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      // Send string to worker
-      workerRef.current.postMessage(event.target.result);
-    };
-    reader.onerror = () => {
-      setError("Error reading file");
+    try {
+      let parsedLocations = null;
+      if (jsonFiles.length) {
+        const parsedSets = await Promise.all(
+          jsonFiles.map(async (file) => parseLocationText(await file.text()))
+        );
+        parsedLocations = parsedSets.flat().sort((a, b) => a.t - b.t);
+      }
+
+      let nextMediaItems = mediaItems;
+      let mediaAdded = 0;
+      let duplicateCount = 0;
+      let mediaSkipped = 0;
+
+      if (mediaFiles.length) {
+        const mediaResult = await parseMediaFiles(mediaFiles);
+        const merged = mergeMediaItems(mediaItems, mediaResult.items);
+        merged.duplicates.forEach((item) => URL.revokeObjectURL(item.url));
+
+        nextMediaItems = merged.items;
+        mediaAdded = merged.added;
+        duplicateCount = merged.duplicates.length;
+        mediaSkipped = mediaResult.skipped.length;
+        setMediaItems(nextMediaItems);
+      }
+
+      if (parsedLocations) {
+        setRawData(parsedLocations);
+        setRouteMode('location');
+        setLocations([]);
+
+        const range = getDefaultDateRange(parsedLocations, nextMediaItems);
+        if (range) setDateRange(range);
+      } else if (routeMode !== 'location' && nextMediaItems.length) {
+        const mediaLocations = mediaItemsToLocations(nextMediaItems);
+        setRawData(mediaLocations);
+        setRouteMode('media');
+
+        const range = getDefaultDateRange(mediaLocations, nextMediaItems);
+        if (range) setDateRange(range);
+      }
+
+      const notice = formatImportSummary({
+        jsonPointCount: parsedLocations?.length || 0,
+        mediaAdded,
+        mediaSkipped,
+        duplicates: duplicateCount,
+      });
+
+      if (notice) setImportNotice(notice);
+
+      if (!parsedLocations && mediaFiles.length && !mediaAdded && !duplicateCount && !rawData) {
+        setError('No usable media metadata found. Photos and videos need embedded timestamp and GPS metadata.');
+      }
+    } catch (err) {
+      setError(err.message || 'Could not import your files.');
+    } finally {
       setProcessing(false);
     }
-    reader.readAsText(file);
-  };
+  }, [mediaItems, rawData, routeMode]);
 
-  const handleManualPaste = (e) => {
-    const text = e.target.value;
+  const handleFileUpload = useCallback((e) => {
+    importFiles(e.target.files);
+    e.target.value = '';
+  }, [importFiles]);
+
+  const handleManualPaste = useCallback(async (e) => {
+    const text = e.target.value.trim();
     if (!text) return;
 
     setProcessing(true);
     setError('');
+    setImportNotice('');
     setIsPlaying(false);
     setLocations([]);
 
-    // Send string to worker directly
-    workerRef.current.postMessage(text);
-  }
+    try {
+      const parsed = await parseLocationText(text);
+      setRawData(parsed);
+      setRouteMode('location');
+
+      const range = getDefaultDateRange(parsed, mediaItems);
+      if (range) setDateRange(range);
+
+      setImportNotice(formatImportSummary({ jsonPointCount: parsed.length }));
+    } catch (err) {
+      setError(err.message || 'Could not parse pasted JSON.');
+    } finally {
+      setProcessing(false);
+    }
+  }, [mediaItems]);
+
+  const handleClipboardPaste = useCallback((event) => {
+    const files = getClipboardFiles(event).filter((file) => isJsonFile(file) || isMediaFile(file));
+    if (!files.length) return;
+
+    event.preventDefault();
+    importFiles(files);
+  }, [importFiles]);
+
+  const handleDrop = useCallback((event) => {
+    event.preventDefault();
+    importFiles(event.dataTransfer?.files);
+  }, [importFiles]);
+
+  const handleDragOver = useCallback((event) => {
+    event.preventDefault();
+  }, []);
+
+  useEffect(() => {
+    window.addEventListener('paste', handleClipboardPaste);
+    return () => window.removeEventListener('paste', handleClipboardPaste);
+  }, [handleClipboardPaste]);
 
   // --- Filtering & Enhancing ---
 
@@ -400,7 +760,8 @@ export default function App() {
     }
 
     setIsPlaying(false);
-    handleScrub(0);
+    progressRef.current = 0;
+    if (sliderRef.current) sliderRef.current.value = 0;
   }, [rawData, dateRange.start, dateRange.end, isEnhanced]);
 
 
@@ -408,7 +769,11 @@ export default function App() {
 
   if (!rawData) {
     return (
-      <div className="min-h-screen bg-[#f8fafc] text-zinc-900 flex flex-col items-center justify-center p-4 relative overflow-hidden font-sans">
+      <div
+        className="min-h-screen bg-[#f8fafc] text-zinc-900 flex flex-col items-center justify-center p-4 relative overflow-hidden font-sans"
+        onDrop={handleDrop}
+        onDragOver={handleDragOver}
+      >
         <div className="absolute top-0 left-0 w-full h-full overflow-hidden pointer-events-none">
           <div className="absolute -top-[10%] -left-[10%] w-[60%] h-[60%] bg-blue-200/30 rounded-full blur-[120px]" />
           <div className="absolute top-[40%] right-[0%] w-[50%] h-[50%] bg-rose-200/30 rounded-full blur-[120px]" />
@@ -445,17 +810,23 @@ export default function App() {
                   <div className="bg-primary/10 p-3 rounded-full mb-3 group-hover:scale-110 transition-transform">
                     <Upload className="w-6 h-6 text-primary" />
                   </div>
-                  <p className="text-sm font-medium text-zinc-700">Upload JSON</p>
+                  <p className="text-sm font-medium text-zinc-700">Upload JSON, photos, or videos</p>
                 </div>
 
-                <input type="file" className="hidden" accept=".json" onChange={handleFileUpload} />
+                <input
+                  type="file"
+                  className="hidden"
+                  accept=".json,application/json,image/*,video/*"
+                  multiple
+                  onChange={handleFileUpload}
+                />
               </label>
             </div>
 
             <div className="space-y-2">
               <textarea
                 className="w-full h-24 bg-zinc-50 border border-zinc-200 rounded-xl p-3 text-xs font-mono text-zinc-600 focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all resize-none placeholder:text-zinc-300"
-                placeholder='Paste raw JSON here...'
+                placeholder='Paste raw JSON here, or paste photos/videos anywhere on this page...'
                 onBlur={handleManualPaste}
               />
             </div>
@@ -477,6 +848,15 @@ export default function App() {
                 </motion.div>
               )}
 
+              {importNotice && !processing && (
+                <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: 'auto' }} exit={{ opacity: 0, height: 0 }} className="overflow-hidden">
+                  <div className="bg-emerald-50 text-emerald-700 text-sm p-3 rounded-xl flex items-center gap-2">
+                    <Images className="w-4 h-4 shrink-0" />
+                    {importNotice}
+                  </div>
+                </motion.div>
+              )}
+
             </AnimatePresence>
           </Card>
 
@@ -493,8 +873,12 @@ export default function App() {
   }
 
   return (
-    <div className="h-screen w-screen bg-slate-50 overflow-hidden relative font-sans">
-      <ErrorBoundary onReset={() => setRawData(null)}>
+    <div
+      className="h-screen w-screen bg-slate-50 overflow-hidden relative font-sans"
+      onDrop={handleDrop}
+      onDragOver={handleDragOver}
+    >
+      <ErrorBoundary onReset={resetJourney}>
         <MapContainer
           center={[0, 0]}
           zoom={2}
@@ -510,8 +894,16 @@ export default function App() {
 
           <AnimatedPathLayer
             locations={locations}
+            fitPoints={fitPoints}
             progressRef={progressRef}
             distRef={distRef}
+            timeBounds={timeBounds}
+          />
+
+          <AnimatedMediaLayer
+            mediaItems={filteredMediaItems}
+            progressRef={progressRef}
+            timeBounds={timeBounds}
           />
 
         </MapContainer>
@@ -523,10 +915,10 @@ export default function App() {
           {/* Clock & Odometer Display */}
           <div className="bg-white/90 backdrop-blur-xl border border-white/40 shadow-glass rounded-2xl px-8 py-3 text-center pointer-events-auto shadow-xl flex flex-col items-center">
             <div ref={clockRef} className="text-xl font-bold text-zinc-800 tabular-nums font-outfit">
-              {locations.length > 0 ? format(locations[0].t, 'MMM dd, yyyy') : '...'}
+              {timeBounds ? format(timeBounds.start, 'MMM dd, yyyy') : '...'}
             </div>
             <div ref={clockSubRef} className="text-xs text-[#00A6CE] font-bold uppercase tracking-widest mt-0.5">
-              {locations.length > 0 ? format(locations[0].t, 'HH:mm:ss') : '--:--:--'}
+              {timeBounds ? format(timeBounds.start, 'HH:mm:ss') : '--:--:--'}
             </div>
             <div className="mt-3 pt-3 border-t border-zinc-100 flex flex-col items-center">
               <div ref={distRef} className="text-lg font-black text-zinc-900 tabular-nums tracking-tight leading-none">0.0</div>
@@ -538,13 +930,61 @@ export default function App() {
 
 
           {/* Actions */}
-          <div className="space-x-2 pointer-events-auto flex">
-            <Button variant="secondary" onClick={() => setRawData(null)} className="p-2 rounded-xl h-10 w-10 text-zinc-400 hover:text-red-500">
+          <div className="pointer-events-auto flex items-center gap-2">
+            {mediaItems.length > 0 && (
+              <div className="h-10 px-3 rounded-xl bg-white/90 border border-white/60 shadow-sm flex items-center gap-2 text-xs font-bold text-zinc-500">
+                <Images className="w-4 h-4 text-[#00A6CE]" />
+                {filteredMediaItems.length}/{mediaItems.length}
+              </div>
+            )}
+            <input
+              ref={fileInputRef}
+              type="file"
+              className="hidden"
+              accept=".json,application/json,image/*,video/*"
+              multiple
+              onChange={handleFileUpload}
+            />
+            <Button
+              variant="secondary"
+              onClick={() => fileInputRef.current?.click()}
+              className="p-2 rounded-xl h-10 w-10 text-zinc-400 hover:text-[#00A6CE]"
+              aria-label="Add photos or videos"
+              title="Add photos or videos"
+            >
+              <ImagePlus className="w-5 h-5" />
+            </Button>
+            <Button
+              variant="secondary"
+              onClick={resetJourney}
+              className="p-2 rounded-xl h-10 w-10 text-zinc-400 hover:text-red-500"
+              aria-label="Clear journey"
+              title="Clear journey"
+            >
               <Trash2 className="w-5 h-5" />
             </Button>
           </div>
 
         </div>
+
+        <AnimatePresence>
+          {(error || importNotice || processing) && (
+            <motion.div
+              initial={{ opacity: 0, y: -8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -8 }}
+              className={cn(
+                "pointer-events-auto max-w-md px-4 py-2 rounded-xl shadow-lg border text-sm font-medium flex items-center gap-2",
+                error
+                  ? "bg-red-50/95 border-red-100 text-red-600"
+                  : "bg-white/95 border-white/60 text-zinc-600"
+              )}
+            >
+              {error ? <AlertCircle className="w-4 h-4 shrink-0" /> : <Images className="w-4 h-4 shrink-0 text-[#00A6CE]" />}
+              {processing ? 'Processing your files...' : error || importNotice}
+            </motion.div>
+          )}
+        </AnimatePresence>
 
       </div>
 
@@ -616,7 +1056,7 @@ export default function App() {
                       }
                       setIsPlaying(!isPlaying);
                     }}
-                    disabled={isBuffering}
+                    disabled={isBuffering || !canPlay}
                   >
                     {isBuffering ? (
                       <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />

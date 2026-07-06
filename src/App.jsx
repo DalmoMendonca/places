@@ -4,7 +4,7 @@ import { MapContainer, TileLayer, useMap } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Upload, Play, Pause, ChevronDown, ChevronUp, Calendar, Trash2, AlertCircle, ImagePlus, Images } from 'lucide-react';
+import { Upload, Play, Pause, ChevronDown, ChevronUp, Calendar, Trash2, AlertCircle, ImagePlus, Images, X } from 'lucide-react';
 import logoUrl from './assets/places-logo.png';
 import { format, subDays, startOfDay, endOfDay, parseISO } from 'date-fns';
 import clsx from 'clsx';
@@ -187,44 +187,52 @@ const getClipboardFiles = (event) => {
   return Array.from(filesByKey.values());
 };
 
-const escapeHtml = (value) => (
-  String(value)
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&#039;')
-);
+const MIN_MEDIA_DISPLAY_MS = 500;
 
-const renderMediaMarkerHtml = (item) => {
-  const src = escapeHtml(item.url);
-  const media = item.type === 'video'
-    ? `<video src="${src}" muted playsinline preload="metadata"></video><span class="media-marker__badge">▶</span>`
-    : `<img src="${src}" alt="" loading="lazy" />`;
+const MediaViewport = ({ item, index, total }) => {
+  if (!total) return null;
 
-  return `
-    <div class="media-marker">
-      <div class="media-marker__thumb">${media}</div>
-      <div class="media-marker__stem"></div>
+  return (
+    <div className="media-viewport pointer-events-auto w-[min(38vw,180px)] min-w-[124px] md:w-52 aspect-square overflow-hidden rounded-xl border border-white/70 bg-zinc-950 shadow-2xl shadow-slate-900/20 relative">
+      {item ? (
+        <>
+          {item.type === 'video' ? (
+            <video
+              key={item.id}
+              src={item.url}
+              className="h-full w-full object-cover"
+              muted
+              autoPlay
+              loop
+              playsInline
+              preload="metadata"
+            />
+          ) : (
+            <img
+              key={item.id}
+              src={item.url}
+              alt={item.name}
+              className="h-full w-full object-cover"
+              draggable="false"
+            />
+          )}
+          <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/75 to-transparent px-2.5 pb-2 pt-8">
+            <div className="flex items-end justify-between gap-2 text-white">
+              <span className="truncate text-[11px] font-semibold">{format(item.t, 'MMM d, HH:mm')}</span>
+              <span className="shrink-0 rounded-md bg-white/20 px-1.5 py-0.5 text-[10px] font-bold tabular-nums">
+                {index + 1}/{total}
+              </span>
+            </div>
+          </div>
+        </>
+      ) : (
+        <div className="flex h-full w-full flex-col items-center justify-center gap-2 bg-white/90 text-zinc-400">
+          <Images className="h-7 w-7 text-[#00A6CE]" />
+          <span className="text-xs font-bold tabular-nums">0/{total}</span>
+        </div>
+      )}
     </div>
-  `;
-};
-
-const renderMediaPopupHtml = (item) => {
-  const src = escapeHtml(item.url);
-  const name = escapeHtml(item.name);
-  const date = escapeHtml(new Date(item.t).toLocaleString());
-  const media = item.type === 'video'
-    ? `<video src="${src}" controls playsinline preload="metadata"></video>`
-    : `<img src="${src}" alt="${name}" />`;
-
-  return `
-    <div class="media-popup">
-      <div class="media-popup__media">${media}</div>
-      <div class="media-popup__title">${name}</div>
-      <div class="media-popup__date">${date}</div>
-    </div>
-  `;
+  );
 };
 
 // --- Optimised Map Layer ---
@@ -387,91 +395,6 @@ const AnimatedPathLayer = ({ locations, fitPoints, progressRef, distRef, timeBou
   return null;
 }
 
-const AnimatedMediaLayer = ({ mediaItems, progressRef, timeBounds }) => {
-  const map = useMap();
-  const markersRef = useRef(new Map());
-  const lastIndexRef = useRef(-2);
-  const lastSyncProgressRef = useRef(-1);
-
-  useEffect(() => {
-    markersRef.current.forEach((marker) => marker.remove());
-    markersRef.current.clear();
-    lastIndexRef.current = -2;
-    lastSyncProgressRef.current = -1;
-  }, [mediaItems, map]);
-
-  useEffect(() => {
-    const markers = markersRef.current;
-    return () => {
-      markers.forEach((marker) => marker.remove());
-      markers.clear();
-    };
-  }, []);
-
-  useEffect(() => {
-    let animId;
-
-    const sync = () => {
-      if (!map || !timeBounds || !mediaItems.length) {
-        animId = requestAnimationFrame(sync);
-        return;
-      }
-
-      const p = progressRef.current;
-      if (p === lastSyncProgressRef.current) {
-        animId = requestAnimationFrame(sync);
-        return;
-      }
-      lastSyncProgressRef.current = p;
-
-      const targetTime = timeBounds.start + (p * (timeBounds.end - timeBounds.start));
-      const lastIndex = findLastIndexBefore(mediaItems, targetTime);
-
-      if (lastIndex !== lastIndexRef.current) {
-        for (let i = 0; i <= lastIndex; i += 1) {
-          const item = mediaItems[i];
-          if (!item || markersRef.current.has(item.id)) continue;
-
-          const marker = L.marker([item.lat, item.lng], {
-            icon: L.divIcon({
-              html: renderMediaMarkerHtml(item),
-              className: '',
-              iconSize: [64, 78],
-              iconAnchor: [32, 70],
-              popupAnchor: [0, -64],
-            }),
-            keyboard: false,
-          }).addTo(map);
-
-          marker.bindPopup(renderMediaPopupHtml(item), {
-            className: 'media-popup-shell',
-            maxWidth: 280,
-            closeButton: true,
-          });
-          marker._mediaIndex = i;
-          markersRef.current.set(item.id, marker);
-        }
-
-        markersRef.current.forEach((marker, id) => {
-          if (marker._mediaIndex > lastIndex) {
-            marker.remove();
-            markersRef.current.delete(id);
-          }
-        });
-
-        lastIndexRef.current = lastIndex;
-      }
-
-      animId = requestAnimationFrame(sync);
-    };
-
-    animId = requestAnimationFrame(sync);
-    return () => cancelAnimationFrame(animId);
-  }, [map, mediaItems, progressRef, timeBounds]);
-
-  return null;
-};
-
 // --- Main App ---
 
 export default function App() {
@@ -481,6 +404,7 @@ export default function App() {
   const [locations, setLocations] = useState([]);
   const [error, setError] = useState('');
   const [importNotice, setImportNotice] = useState('');
+  const [activeMediaId, setActiveMediaId] = useState(null);
   const [processing, setProcessing] = useState(false);
 
   // Controls
@@ -503,7 +427,7 @@ export default function App() {
   });
   const [isPlaying, setIsPlaying] = useState(false);
   const [showControls, setShowControls] = useState(true);
-  const [isEnhanced, setIsEnhanced] = useState(false);
+  const [isEnhanced, setIsEnhanced] = useState(true);
   const [speed, setSpeed] = useState(1);
   const [isBuffering, setIsBuffering] = useState(false);
 
@@ -515,6 +439,13 @@ export default function App() {
   const distRef = useRef(null);
   const fileInputRef = useRef(null);
   const mediaItemsRef = useRef([]);
+  const activeMediaIdRef = useRef(null);
+  const mediaPlaybackRef = useRef({
+    activeId: null,
+    activeStartedAt: 0,
+    lastTimelineTime: NaN,
+    nextIndex: 0,
+  });
 
   const filteredMediaItems = useMemo(() => {
     const s = startOfDay(dateRange.start).getTime();
@@ -532,6 +463,12 @@ export default function App() {
 
   const canPlay = Boolean(timeBounds && (locations.length > 1 || filteredMediaItems.length > 0));
 
+  const activeMediaIndex = useMemo(() => (
+    activeMediaId ? filteredMediaItems.findIndex((item) => item.id === activeMediaId) : -1
+  ), [activeMediaId, filteredMediaItems]);
+
+  const activeMediaItem = activeMediaIndex >= 0 ? filteredMediaItems[activeMediaIndex] : null;
+
   useEffect(() => {
     mediaItemsRef.current = mediaItems;
   }, [mediaItems]);
@@ -542,20 +479,92 @@ export default function App() {
     };
   }, []);
 
+  const getTimelineTimeForProgress = useCallback((progressValue) => {
+    if (!timeBounds) return NaN;
+    return timeBounds.start + (progressValue * (timeBounds.end - timeBounds.start));
+  }, [timeBounds]);
+
+  const setActiveMedia = useCallback((id) => {
+    if (activeMediaIdRef.current === id) return;
+    activeMediaIdRef.current = id;
+    setActiveMediaId(id);
+  }, []);
+
+  const resetMediaPlayback = useCallback((timelineTime, frameTime = performance.now(), includeCurrent = true) => {
+    if (!filteredMediaItems.length || !Number.isFinite(timelineTime)) {
+      mediaPlaybackRef.current = {
+        activeId: null,
+        activeStartedAt: frameTime,
+        lastTimelineTime: timelineTime,
+        nextIndex: 0,
+      };
+      setActiveMedia(null);
+      return;
+    }
+
+    const lookupTime = includeCurrent ? timelineTime : timelineTime - 1;
+    const activeIndex = findLastIndexBefore(filteredMediaItems, lookupTime);
+    const activeId = activeIndex >= 0 ? filteredMediaItems[activeIndex].id : null;
+
+    mediaPlaybackRef.current = {
+      activeId,
+      activeStartedAt: frameTime,
+      lastTimelineTime: timelineTime,
+      nextIndex: Math.max(0, activeIndex + 1),
+    };
+    setActiveMedia(activeId);
+  }, [filteredMediaItems, setActiveMedia]);
+
+  const syncMediaToTimelineTime = useCallback((timelineTime, frameTime, shouldQueue = true) => {
+    if (!filteredMediaItems.length || !Number.isFinite(timelineTime)) {
+      resetMediaPlayback(timelineTime, frameTime);
+      return false;
+    }
+
+    const state = mediaPlaybackRef.current;
+    const movedBackwards = Number.isFinite(state.lastTimelineTime) && timelineTime < state.lastTimelineTime - 1;
+
+    if (!shouldQueue || movedBackwards) {
+      resetMediaPlayback(timelineTime, frameTime);
+      return false;
+    }
+
+    state.lastTimelineTime = timelineTime;
+
+    const nextItem = filteredMediaItems[state.nextIndex];
+    const hasPendingDueItem = Boolean(nextItem && nextItem.t <= timelineTime);
+    const canAdvance = !state.activeId || frameTime - state.activeStartedAt >= MIN_MEDIA_DISPLAY_MS;
+
+    if (hasPendingDueItem && canAdvance) {
+      state.activeId = nextItem.id;
+      state.activeStartedAt = frameTime;
+      state.nextIndex += 1;
+      setActiveMedia(nextItem.id);
+    }
+
+    const followingItem = filteredMediaItems[state.nextIndex];
+    return Boolean(followingItem && followingItem.t <= timelineTime);
+  }, [filteredMediaItems, resetMediaPlayback, setActiveMedia]);
+
   const syncUIToProgress = useCallback(() => {
     if (!timeBounds) return;
     const p = progressRef.current;
-    const currentTime = timeBounds.start + (p * (timeBounds.end - timeBounds.start));
+    const currentTime = getTimelineTimeForProgress(p);
 
     if (clockRef.current) clockRef.current.innerText = format(currentTime, 'MMM dd, yyyy');
     if (clockSubRef.current) clockSubRef.current.innerText = format(currentTime, 'HH:mm:ss');
     if (sliderRef.current) sliderRef.current.value = p;
-  }, [timeBounds]);
+  }, [getTimelineTimeForProgress, timeBounds]);
 
   const handleScrub = useCallback((val) => {
     progressRef.current = val;
     syncUIToProgress();
-  }, [syncUIToProgress]);
+    resetMediaPlayback(getTimelineTimeForProgress(val));
+  }, [getTimelineTimeForProgress, resetMediaPlayback, syncUIToProgress]);
+
+  useEffect(() => {
+    resetMediaPlayback(getTimelineTimeForProgress(progressRef.current));
+  }, [filteredMediaItems, getTimelineTimeForProgress, resetMediaPlayback]);
 
 
 
@@ -573,7 +582,10 @@ export default function App() {
 
         progressRef.current = Math.min(1, progressRef.current + (travelDelta / totalTravelTime));
 
-        if (progressRef.current >= 1) setIsPlaying(false);
+        const currentTime = getTimelineTimeForProgress(progressRef.current);
+        const hasPendingMedia = syncMediaToTimelineTime(currentTime, time, true);
+
+        if (progressRef.current >= 1 && !hasPendingMedia) setIsPlaying(false);
 
         // Targeted UI updates (No React Re-render)
         syncUIToProgress();
@@ -583,7 +595,7 @@ export default function App() {
     };
     animId = requestAnimationFrame(step);
     return () => cancelAnimationFrame(animId);
-  }, [isPlaying, canPlay, timeBounds, speed, syncUIToProgress]);
+  }, [isPlaying, canPlay, timeBounds, speed, getTimelineTimeForProgress, syncMediaToTimelineTime, syncUIToProgress]);
 
   // --- Handlers ---
   const resetJourney = useCallback(() => {
@@ -594,10 +606,11 @@ export default function App() {
     setLocations([]);
     setError('');
     setImportNotice('');
+    setActiveMedia(null);
     setIsPlaying(false);
-    setIsEnhanced(false);
+    setIsEnhanced(true);
     progressRef.current = 0;
-  }, [mediaItems]);
+  }, [mediaItems, setActiveMedia]);
 
   const importFiles = useCallback(async (fileList) => {
     const files = Array.from(fileList || []);
@@ -727,6 +740,13 @@ export default function App() {
     window.addEventListener('paste', handleClipboardPaste);
     return () => window.removeEventListener('paste', handleClipboardPaste);
   }, [handleClipboardPaste]);
+
+  useEffect(() => {
+    if (!importNotice || processing) return undefined;
+
+    const timer = window.setTimeout(() => setImportNotice(''), 5000);
+    return () => window.clearTimeout(timer);
+  }, [importNotice, processing]);
 
   // --- Filtering & Enhancing ---
 
@@ -900,71 +920,65 @@ export default function App() {
             timeBounds={timeBounds}
           />
 
-          <AnimatedMediaLayer
-            mediaItems={filteredMediaItems}
-            progressRef={progressRef}
-            timeBounds={timeBounds}
-          />
-
         </MapContainer>
       </ErrorBoundary>
 
-      <div className="absolute top-0 left-0 right-0 p-4 z-[500] pointer-events-none flex flex-col items-center gap-4">
-        {/* Top Bar */}
-        <div className="w-full flex justify-between items-start">
-          {/* Clock & Odometer Display */}
-          <div className="bg-white/90 backdrop-blur-xl border border-white/40 shadow-glass rounded-2xl px-8 py-3 text-center pointer-events-auto shadow-xl flex flex-col items-center">
-            <div ref={clockRef} className="text-xl font-bold text-zinc-800 tabular-nums font-outfit">
+      <div className="absolute top-0 left-0 right-0 p-3 md:p-4 z-[500] pointer-events-none flex flex-col items-center gap-3">
+        <div className="w-full flex justify-between items-start gap-3">
+          <div className="bg-white/90 backdrop-blur-xl border border-white/50 shadow-xl rounded-xl px-3.5 py-2.5 text-left pointer-events-auto min-w-[138px] max-w-[46vw]">
+            <div ref={clockRef} className="text-base md:text-lg font-bold text-zinc-800 tabular-nums font-outfit leading-tight truncate">
               {timeBounds ? format(timeBounds.start, 'MMM dd, yyyy') : '...'}
             </div>
-            <div ref={clockSubRef} className="text-xs text-[#00A6CE] font-bold uppercase tracking-widest mt-0.5">
+            <div ref={clockSubRef} className="text-[11px] md:text-xs text-[#00A6CE] font-bold uppercase tracking-widest mt-0.5 tabular-nums">
               {timeBounds ? format(timeBounds.start, 'HH:mm:ss') : '--:--:--'}
             </div>
-            <div className="mt-3 pt-3 border-t border-zinc-100 flex flex-col items-center">
-              <div ref={distRef} className="text-lg font-black text-zinc-900 tabular-nums tracking-tight leading-none">0.0</div>
-              <div className="text-[10px] font-bold text-zinc-400 uppercase tracking-[0.2em] mt-1.5">Miles Traveled</div>
+            <div className="mt-2 pt-2 border-t border-zinc-100 flex items-baseline gap-1.5">
+              <div ref={distRef} className="text-base md:text-lg font-black text-zinc-900 tabular-nums tracking-tight leading-none">0.0</div>
+              <div className="text-[10px] font-bold text-zinc-400 uppercase tracking-[0.16em]">mi</div>
             </div>
           </div>
 
-
-
-
-          {/* Actions */}
-          <div className="pointer-events-auto flex items-center gap-2">
-            {mediaItems.length > 0 && (
-              <div className="h-10 px-3 rounded-xl bg-white/90 border border-white/60 shadow-sm flex items-center gap-2 text-xs font-bold text-zinc-500">
-                <Images className="w-4 h-4 text-[#00A6CE]" />
-                {filteredMediaItems.length}/{mediaItems.length}
-              </div>
-            )}
-            <input
-              ref={fileInputRef}
-              type="file"
-              className="hidden"
-              accept=".json,application/json,image/*,video/*"
-              multiple
-              onChange={handleFileUpload}
+          <div className="flex flex-col items-end gap-2">
+            <div className="pointer-events-auto flex items-center gap-1.5">
+              {mediaItems.length > 0 && (
+                <div className="h-9 px-2.5 rounded-lg bg-white/90 border border-white/60 shadow-sm flex items-center gap-1.5 text-[11px] font-bold text-zinc-500">
+                  <Images className="w-4 h-4 text-[#00A6CE]" />
+                  {filteredMediaItems.length}/{mediaItems.length}
+                </div>
+              )}
+              <input
+                ref={fileInputRef}
+                type="file"
+                className="hidden"
+                accept=".json,application/json,image/*,video/*"
+                multiple
+                onChange={handleFileUpload}
+              />
+              <Button
+                variant="secondary"
+                onClick={() => fileInputRef.current?.click()}
+                className="p-2 rounded-lg h-9 w-9 text-zinc-400 hover:text-[#00A6CE]"
+                aria-label="Add photos or videos"
+                title="Add photos or videos"
+              >
+                <ImagePlus className="w-[18px] h-[18px]" />
+              </Button>
+              <Button
+                variant="secondary"
+                onClick={resetJourney}
+                className="p-2 rounded-lg h-9 w-9 text-zinc-400 hover:text-red-500"
+                aria-label="Clear journey"
+                title="Clear journey"
+              >
+                <Trash2 className="w-[18px] h-[18px]" />
+              </Button>
+            </div>
+            <MediaViewport
+              item={activeMediaItem}
+              index={activeMediaIndex}
+              total={filteredMediaItems.length}
             />
-            <Button
-              variant="secondary"
-              onClick={() => fileInputRef.current?.click()}
-              className="p-2 rounded-xl h-10 w-10 text-zinc-400 hover:text-[#00A6CE]"
-              aria-label="Add photos or videos"
-              title="Add photos or videos"
-            >
-              <ImagePlus className="w-5 h-5" />
-            </Button>
-            <Button
-              variant="secondary"
-              onClick={resetJourney}
-              className="p-2 rounded-xl h-10 w-10 text-zinc-400 hover:text-red-500"
-              aria-label="Clear journey"
-              title="Clear journey"
-            >
-              <Trash2 className="w-5 h-5" />
-            </Button>
           </div>
-
         </div>
 
         <AnimatePresence>
@@ -974,14 +988,27 @@ export default function App() {
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -8 }}
               className={cn(
-                "pointer-events-auto max-w-md px-4 py-2 rounded-xl shadow-lg border text-sm font-medium flex items-center gap-2",
+                "pointer-events-auto max-w-[calc(100vw-1.5rem)] md:max-w-md pl-3 pr-2 py-2 rounded-xl shadow-lg border text-sm font-medium flex items-center gap-2",
                 error
                   ? "bg-red-50/95 border-red-100 text-red-600"
                   : "bg-white/95 border-white/60 text-zinc-600"
               )}
             >
               {error ? <AlertCircle className="w-4 h-4 shrink-0" /> : <Images className="w-4 h-4 shrink-0 text-[#00A6CE]" />}
-              {processing ? 'Processing your files...' : error || importNotice}
+              <span className="min-w-0 flex-1">{processing ? 'Processing your files...' : error || importNotice}</span>
+              {!processing && (
+                <button
+                  type="button"
+                  className="grid h-7 w-7 shrink-0 place-items-center rounded-lg text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-700"
+                  onClick={() => {
+                    setError('');
+                    setImportNotice('');
+                  }}
+                  aria-label="Dismiss"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              )}
             </motion.div>
           )}
         </AnimatePresence>
@@ -997,101 +1024,103 @@ export default function App() {
             initial={{ y: 200, opacity: 0 }}
             animate={{ y: 0, opacity: 1 }}
             exit={{ y: 200, opacity: 0 }}
-            className="absolute bottom-0 left-0 right-0 p-6 z-[500]"
+            className="absolute bottom-0 left-0 right-0 p-3 md:p-4 z-[500] pointer-events-none"
           >
-            <Card className="max-w-xl mx-auto shadow-2xl shadow-blue-900/5 ring-1 ring-black/5">
-              <div className="flex flex-col gap-5">
-                <div className="flex flex-wrap items-center justify-between gap-4 border-b border-zinc-100 pb-4">
-                  <div className="flex items-center gap-3 text-sm text-zinc-600 bg-zinc-50 px-3 py-1.5 rounded-lg border border-zinc-100">
-                    <Calendar className="w-4 h-4 text-zinc-400" />
+            <div className="pointer-events-auto max-w-2xl mx-auto rounded-2xl bg-white/[0.92] backdrop-blur-xl border border-white/60 shadow-2xl shadow-blue-900/10 ring-1 ring-black/5 px-3 py-3 md:px-4 md:py-3">
+              <input
+                ref={sliderRef}
+                type="range"
+                min="0"
+                max="1"
+                step="0.0001"
+                defaultValue="0"
+                onChange={(e) => handleScrub(parseFloat(e.target.value))}
+                className="w-full h-1.5 bg-zinc-100 rounded-full appearance-none cursor-pointer accent-primary focus:outline-none"
+              />
+
+              <div className="mt-3 grid grid-cols-[1fr_auto] items-center gap-3">
+                <div className="min-w-0 flex flex-col gap-2">
+                  <div className="flex items-center gap-2 rounded-lg border border-zinc-100 bg-zinc-50 px-2.5 py-1.5 text-zinc-600">
+                    <Calendar className="w-4 h-4 shrink-0 text-zinc-400" />
                     <input
                       type="date"
                       value={format(dateRange.start, 'yyyy-MM-dd')}
                       onChange={e => e.target.value && setDateRange(prev => ({ ...prev, start: parseISO(e.target.value) }))}
-                      className="bg-transparent border-none p-0 text-zinc-700 text-xs font-medium focus:ring-0 w-24"
+                      className="min-w-0 flex-1 bg-transparent border-none p-0 text-zinc-700 text-xs font-semibold focus:ring-0"
                     />
-                    <span className="text-zinc-300">→</span>
+                    <span className="text-[11px] font-bold uppercase text-zinc-300">to</span>
                     <input
                       type="date"
                       value={format(dateRange.end, 'yyyy-MM-dd')}
                       onChange={e => e.target.value && setDateRange(prev => ({ ...prev, end: parseISO(e.target.value) }))}
-                      className="bg-transparent border-none p-0 text-zinc-700 text-xs font-medium focus:ring-0 w-24 text-right"
+                      className="min-w-0 flex-1 bg-transparent border-none p-0 text-zinc-700 text-xs font-semibold focus:ring-0 text-right"
                     />
                   </div>
 
-                  {/* Enhance Toggle */}
-                  <button
-                    onClick={() => setIsEnhanced(!isEnhanced)}
-                    className={cn(
-                      "text-[10px] font-bold uppercase tracking-wider px-3 py-1.5 rounded-lg border transition-all",
-                      isEnhanced
-                        ? "bg-emerald-50 text-emerald-600 border-emerald-200"
-                        : "bg-zinc-50 text-zinc-400 border-zinc-100 hover:border-zinc-300"
-                    )}
-                  >
-                    {isEnhanced ? "Roads On" : "Roads Off"}
-                  </button>
+                  <div className="flex min-w-0 flex-wrap items-center gap-2">
+                    <button
+                      onClick={() => setIsEnhanced(!isEnhanced)}
+                      className={cn(
+                        "h-8 rounded-lg border px-3 text-[10px] font-bold uppercase tracking-wider transition-all",
+                        isEnhanced
+                          ? "bg-emerald-50 text-emerald-600 border-emerald-200"
+                          : "bg-zinc-50 text-zinc-400 border-zinc-100 hover:border-zinc-300"
+                      )}
+                    >
+                      {isEnhanced ? "Roads On" : "Roads Off"}
+                    </button>
 
-                  <div className="flex items-center gap-2 bg-zinc-50 px-3 py-1.5 rounded-lg border border-zinc-100">
-                    <span className="text-[10px] font-bold text-zinc-400 uppercase mr-1">Speed</span>
-                    {[1, 2, 5, 10].map(s => (
-                      <button
-                        key={s}
-                        onClick={() => setSpeed(s)}
-                        className={cn(
-                          "w-7 h-7 flex items-center justify-center rounded-md text-[10px] font-bold transition-all",
-                          speed === s ? "bg-primary text-white" : "text-zinc-400 hover:bg-zinc-200"
-                        )}
-                      >
-                        {s}x
-                      </button>
-                    ))}
-                  </div>
-
-                  <Button
-                    className="h-10 w-10 rounded-full p-0 flex items-center justify-center shrink-0"
-                    onClick={() => {
-                      if (!isPlaying && progressRef.current >= 1) {
-                        handleScrub(0);
-                      }
-                      setIsPlaying(!isPlaying);
-                    }}
-                    disabled={isBuffering || !canPlay}
-                  >
-                    {isBuffering ? (
-                      <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                    ) : isPlaying ? (
-                      <Pause className="w-4 h-4 fill-current" />
-                    ) : (
-                      <Play className="w-4 h-4 fill-current ml-0.5" />
-                    )}
-                  </Button>
-                </div>
-
-                <div className="space-y-4">
-                  <div className="relative group">
-                    <input
-                      ref={sliderRef}
-                      type="range"
-                      min="0"
-                      max="1"
-                      step="0.0001"
-                      defaultValue="0"
-                      onChange={(e) => handleScrub(parseFloat(e.target.value))}
-                      className="w-full h-1.5 bg-zinc-100 rounded-full appearance-none cursor-pointer accent-primary focus:outline-none"
-                    />
+                    <div className="flex h-8 items-center gap-1 rounded-lg border border-zinc-100 bg-zinc-50 px-1.5">
+                      <span className="px-1 text-[10px] font-bold text-zinc-400 uppercase">Speed</span>
+                      {[1, 2, 5, 10].map(s => (
+                        <button
+                          key={s}
+                          onClick={() => setSpeed(s)}
+                          className={cn(
+                            "w-7 h-6 flex items-center justify-center rounded-md text-[10px] font-bold transition-all",
+                            speed === s ? "bg-primary text-white" : "text-zinc-400 hover:bg-zinc-200"
+                          )}
+                        >
+                          {s}x
+                        </button>
+                      ))}
+                    </div>
                   </div>
                 </div>
 
+                <Button
+                  className="h-12 w-12 rounded-full p-0 flex items-center justify-center shrink-0"
+                  onClick={() => {
+                    if (!isPlaying && progressRef.current >= 1) {
+                      handleScrub(0);
+                    }
+                    if (!isPlaying && progressRef.current <= 0.0001) {
+                      resetMediaPlayback(getTimelineTimeForProgress(progressRef.current), performance.now(), false);
+                    }
+                    setIsPlaying(!isPlaying);
+                  }}
+                  disabled={isBuffering || !canPlay}
+                >
+                  {isBuffering ? (
+                    <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                  ) : isPlaying ? (
+                    <Pause className="w-5 h-5 fill-current" />
+                  ) : (
+                    <Play className="w-5 h-5 fill-current ml-0.5" />
+                  )}
+                </Button>
               </div>
-            </Card>
+            </div>
           </motion.div>
         )}
       </AnimatePresence>
 
       <button
         onClick={() => setShowControls(!showControls)}
-        className="absolute bottom-6 right-6 z-[500] bg-white shadow-soft p-3 rounded-full text-zinc-400 hover:text-zinc-600 transition-all md:hidden border border-zinc-100"
+        className={cn(
+          "absolute right-3 z-[500] bg-white shadow-soft p-3 rounded-full text-zinc-400 hover:text-zinc-600 transition-all md:hidden border border-zinc-100",
+          showControls ? "bottom-[calc(env(safe-area-inset-bottom)+132px)]" : "bottom-[calc(env(safe-area-inset-bottom)+16px)]"
+        )}
       >
         {showControls ? <ChevronDown className="w-5 h-5" /> : <ChevronUp className="w-5 h-5" />}
       </button>

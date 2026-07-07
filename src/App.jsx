@@ -894,7 +894,7 @@ export default function App() {
 
   return (
     <div
-      className="h-screen w-screen bg-slate-50 overflow-hidden relative font-sans"
+      className="app-shell w-screen bg-slate-50 overflow-hidden relative font-sans"
       onDrop={handleDrop}
       onDragOver={handleDragOver}
     >
@@ -923,7 +923,7 @@ export default function App() {
         </MapContainer>
       </ErrorBoundary>
 
-      <div className="absolute top-0 left-0 right-0 p-3 md:p-4 z-[500] pointer-events-none flex flex-col items-center gap-3">
+      <div className="fixed top-0 left-0 right-0 p-3 md:p-4 z-[500] pointer-events-none flex flex-col items-center gap-3">
         <div className="w-full flex justify-between items-start gap-3">
           <div className="bg-white/90 backdrop-blur-xl border border-white/50 shadow-xl rounded-xl px-3.5 py-2.5 text-left pointer-events-auto min-w-[138px] max-w-[46vw]">
             <div ref={clockRef} className="text-base md:text-lg font-bold text-zinc-800 tabular-nums font-outfit leading-tight truncate">
@@ -1024,7 +1024,7 @@ export default function App() {
             initial={{ y: 200, opacity: 0 }}
             animate={{ y: 0, opacity: 1 }}
             exit={{ y: 200, opacity: 0 }}
-            className="absolute bottom-0 left-0 right-0 p-3 md:p-4 z-[500] pointer-events-none"
+            className="fixed left-0 right-0 bottom-[calc(env(safe-area-inset-bottom)+0.75rem)] md:bottom-0 p-3 md:p-4 z-[500] pointer-events-none"
           >
             <div className="pointer-events-auto max-w-2xl mx-auto rounded-2xl bg-white/[0.92] backdrop-blur-xl border border-white/60 shadow-2xl shadow-blue-900/10 ring-1 ring-black/5 px-3 py-3 md:px-4 md:py-3">
               <input
@@ -1118,8 +1118,8 @@ export default function App() {
       <button
         onClick={() => setShowControls(!showControls)}
         className={cn(
-          "absolute right-3 z-[500] bg-white shadow-soft p-3 rounded-full text-zinc-400 hover:text-zinc-600 transition-all md:hidden border border-zinc-100",
-          showControls ? "bottom-[calc(env(safe-area-inset-bottom)+132px)]" : "bottom-[calc(env(safe-area-inset-bottom)+16px)]"
+          "fixed right-3 z-[500] bg-white shadow-soft p-3 rounded-full text-zinc-400 hover:text-zinc-600 transition-all md:hidden border border-zinc-100",
+          showControls ? "bottom-[calc(env(safe-area-inset-bottom)+148px)]" : "bottom-[calc(env(safe-area-inset-bottom)+16px)]"
         )}
       >
         {showControls ? <ChevronDown className="w-5 h-5" /> : <ChevronUp className="w-5 h-5" />}

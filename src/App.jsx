@@ -187,7 +187,7 @@ const getClipboardFiles = (event) => {
   return Array.from(filesByKey.values());
 };
 
-const MIN_MEDIA_DISPLAY_MS = 500;
+const MIN_MEDIA_DISPLAY_MS = 100;
 
 const MediaViewport = ({ item, index, total }) => {
   if (!total) return null;
@@ -533,7 +533,8 @@ export default function App() {
 
     const nextItem = filteredMediaItems[state.nextIndex];
     const hasPendingDueItem = Boolean(nextItem && nextItem.t <= timelineTime);
-    const canAdvance = !state.activeId || frameTime - state.activeStartedAt >= MIN_MEDIA_DISPLAY_MS;
+    const minDisplayMs = MIN_MEDIA_DISPLAY_MS / Math.max(1, speed);
+    const canAdvance = !state.activeId || frameTime - state.activeStartedAt >= minDisplayMs;
 
     if (hasPendingDueItem && canAdvance) {
       state.activeId = nextItem.id;
@@ -544,7 +545,7 @@ export default function App() {
 
     const followingItem = filteredMediaItems[state.nextIndex];
     return Boolean(followingItem && followingItem.t <= timelineTime);
-  }, [filteredMediaItems, resetMediaPlayback, setActiveMedia]);
+  }, [filteredMediaItems, resetMediaPlayback, setActiveMedia, speed]);
 
   const syncUIToProgress = useCallback(() => {
     if (!timeBounds) return;
